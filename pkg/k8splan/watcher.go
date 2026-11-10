@@ -168,14 +168,25 @@ func (w *watcher) start(ctx context.Context) {
 		logrus.Debugf("[K8s] Processing secret %s in namespace %s at generation %d with resource version %s", secret.Name, secret.Namespace, secret.Generation, secret.ResourceVersion)
 		needsApplied := true // needsApplied indicates whether the one-time instructions should be run
 		if rvMismatch, uidMismatch := toInt(w.lastAppliedResourceVersion) > toInt(secret.ResourceVersion), w.secretUID != "" && w.secretUID != string(secret.UID); rvMismatch || uidMismatch {
-			if rvMismatch {
-				logrus.Errorf("[K8s] received secret to process that was older than the last secret operated on. (%s vs %s)", secret.ResourceVersion, w.lastAppliedResourceVersion)
-			}
 			if uidMismatch {
 				logrus.Fatalf("[K8s] received secret UID that differed from existing secret UID. (%s vs %s)", secret.UID, w.secretUID)
 				return nil, nil
 			}
-			return secret, errors.New("secret received was too old")
+			// The controller's Get reads from the API server, not from the informer cache.
+			regressed, liveRV, getErr := resourceVersionRegressed(w.lastAppliedResourceVersion, func() (*v1.Secret, error) {
+				return core.Secret().Get(w.connInfo.Namespace, w.connInfo.SecretName, metav1.GetOptions{})
+			})
+			if getErr != nil {
+				logrus.Errorf("[K8s] error while reading the plan secret from the API server to check its resource version: %v", getErr)
+			}
+			if !regressed {
+				logrus.Errorf("[K8s] received secret to process that was older than the last secret operated on. (%s vs %s)", secret.ResourceVersion, w.lastAppliedResourceVersion)
+				return secret, errors.New("secret received was too old")
+			}
+			// Keep processing the object the informer holds (relisted from the new storage); the
+			// applied-checksum comparison below still decides whether the one-time instructions run.
+			logrus.Warnf("[K8s] plan secret resource version on the API server (%s) is lower than the last one operated on (%s); its storage changed (failover or restore), discarding the last applied resource version", liveRV, w.lastAppliedResourceVersion)
+			w.lastAppliedResourceVersion = ""
 		}
 		if planData, ok := secret.Data[planKey]; ok {
 			logrus.Tracef("[K8s] Byte data: %v", planData)
