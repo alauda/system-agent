@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rancher/lasso/pkg/cache"
 	"github.com/rancher/lasso/pkg/client"
 	"github.com/rancher/lasso/pkg/controller"
 	"github.com/rancher/lasso/pkg/scheme"
@@ -112,12 +111,7 @@ func (w *watcher) start(ctx context.Context) {
 		return
 	}
 
-	cacheFactory := cache.NewSharedCachedFactory(clientFactory, &cache.SharedCacheFactoryOptions{
-		DefaultNamespace: w.connInfo.Namespace,
-		DefaultTweakList: func(options *metav1.ListOptions) {
-			options.FieldSelector = fmt.Sprintf("metadata.name=%s", w.connInfo.SecretName)
-		},
-	})
+	cacheFactory := newPlanSecretCacheFactory(clientFactory, w.connInfo.Namespace, w.connInfo.SecretName)
 
 	controllerFactory := controller.NewSharedControllerFactory(cacheFactory, &controller.SharedControllerFactoryOptions{
 		DefaultRateLimiter: workqueue.NewItemExponentialFailureRateLimiter(1*time.Minute, 5*time.Minute),
@@ -183,8 +177,9 @@ func (w *watcher) start(ctx context.Context) {
 				logrus.Errorf("[K8s] received secret to process that was older than the last secret operated on. (%s vs %s)", secret.ResourceVersion, w.lastAppliedResourceVersion)
 				return secret, errors.New("secret received was too old")
 			}
-			// Keep processing the object the informer holds (relisted from the new storage); the
-			// applied-checksum comparison below still decides whether the one-time instructions run.
+			// Keep processing the object the informer holds (the new storage's current state, see
+			// planSecretListOptions); the applied-checksum comparison below still decides whether the
+			// one-time instructions run.
 			logrus.Warnf("[K8s] plan secret resource version on the API server (%s) is lower than the last one operated on (%s); its storage changed (failover or restore), discarding the last applied resource version", liveRV, w.lastAppliedResourceVersion)
 			w.lastAppliedResourceVersion = ""
 		}
